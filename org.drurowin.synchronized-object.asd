@@ -1,6 +1,7 @@
 (asdf:defsystem :org.drurowin.synchronized-object
   :author "Lucien Pullen"
   :mailto "drurowin@gmail.com"
+  :license "MIT <LICENSE.TXT>"
   :description "read and write object synchronization"
   :long-description "Read and write synchronization of CLOS instances.
 
