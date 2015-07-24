@@ -20,9 +20,9 @@
 ;; THE SOFTWARE.
 (cl:defpackage :org.drurowin.synchronized-object
   (:use :cl :bordeaux-threads)
-  (:export #:set-read-lock
+  (:export #:acquire-read-lock
            #:release-read-lock
-           #:set-access-lock
+           #:acquire-access-lock
            #:release-access-lock
            #:with-locked-object
            #:synchronized-object-mixin))
@@ -33,45 +33,58 @@
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (setf (documentation (find-package :org.drurowin.synchronized-object) t)
         (asdf:system-long-description (asdf:find-system :org.drurowin.synchronized-object))))
+
+(defparameter %indentation% (make-hash-table))
+
+#+swank
+(eval-when (:load-toplevel :execute)
+  (pushnew %indentation% swank::*application-hints-tables*))
 ;;;;========================================================
 ;;;; API routines
-(defgeneric set-read-lock (object &key timeout timeout-callback)
-  (:documentation "Lock the object for read-only access.
+(defgeneric acquire-read-lock (object &optional timeout callback)
+  (:documentation "Lock the object for read-only access.  On success, true is returned.
 
-If the lock cannot be acquired after timeout seconds and
-timeout-callback is NIL or the keyword :SIGNAL, a timeout condition is
-signalled.  When timeout-callback is a function designator, it is called
-with no arguments before signalling the condition."))
+Multiple threads may acquire a read-only lock.  The lock cannot be
+acquired if an access lock (see `acquire-access-lock') is held by
+another thread.
+
+When timeout is non-NIL, the given number of seconds (including zero, to
+return immediately) are waited before giving up acquiring the lock.  In
+this case, NIL is returned.  Callback can be a function designator to
+call when the timeout fails."))
+
+(defgeneric acquire-access-lock (object &optional timeout callback)
+  (:documentation "Lock the object for destructive access.  On success, true is returned.
+
+Only one thread may acquire an access lock.  The lock cannot be acquired
+if another access lock is held or any read-only locks (see
+`acquire-read-lock') are held.
+
+It is an error for a thread to attempt to acquire an access lock on an
+object that it already owns a read-only lock on.
+
+When timeout is non-NIL, the given number of seconds (including zero, to
+return immediately) are waited before giving up acquiring the lock.  In
+this case, NIL is returned.  Callback can be a function designator to
+call when the timeout fails."))
 
 (defgeneric release-read-lock (object)
-  (:documentation "Unlock the object from read-only access."))
-
-(defgeneric set-access-lock (object &key timeout timeout-callback)
-  (:documentation "Lock the object for destructive access.
-
-If the lock cannot be acquired after timeout seconds and
-timeout-callback is NIL or the keyword :SIGNAL, a timeout condition is
-signalled.  When timeout-callback is a function designator, it is called
-with no arguments before signalling the condition."))
+  (:documentation "Unlock the object from read-only state."))
 
 (defgeneric release-access-lock (object)
-  (:documentation "Unlock the object from destructive access."))
+  (:documentation "Unlock the object from destructive state."))
 
-(defmacro with-locked-object ((object &optional type &key timeout timeout-callback) &body body)
-  "Evaluate the body forms with the object locked according to the lock
+(defmacro with-locked-object ((object &optional type timeout callback) &body body)
+  "{ (object &optional type timeout callback) body... }
+
+Evaluate the body forms with the object locked according to the lock
 type.
 
 The object is locked according to the lock type---one of NIL or :READ
-for read-only locking (the default), or :ACCESS for destructive
-locking---and the body forms are evaluated.  The object is unlocked upon
-stack unwind."
-  (check-type type (member nil :read :access))
-  `(unwind-protect
-        (progn (,(if (eql type :access) 'set-access-lock 'set-read-lock)
-                ,object :timeout ,timeout :timeout-callback ,timeout-callback)
-               ,@body)
-     (,(if (eql type :access) 'release-access-lock 'release-read-lock)
-      ,object)))
+for read-only locking (the default) (see `acquire-read-lock'),
+or :ACCESS for destructive locking (see `acquire-access-lock')---during
+the execution of the body forms."
+  `(call/locked-object (lambda () ,@body) ,object ,type ,timeout ,callback))
 
 ;;;;========================================================
 ;;;; implementation
@@ -81,33 +94,79 @@ stack unwind."
    (access-lock :initform nil))
   (:documentation "mixin class for objects that lock slot access"))
 
-(defmacro with-object-thread-locking ((object &key timeout timeout-callback) &body body)
-  (let ((start (gensym "START"))
-        (time (gensym "TIME"))
-        (gthlo (gensym "THREAD-LOCK"))
-        (gto (gensym "TIMEOUT"))
-        (gtocb (gensym "TIMEOUT-CALLBACK"))
-        (gblock (gensym "THE-BLOCK")))
+(defmacro do-until-timeout ((&optional timeout callback)
+                            varlist endlist
+                            &body body
+                            &environment env)
+  (flet ((frob-for-timeout (timeout callback)
+           (let ((start (gensym "START"))
+                 (time (gensym "TIME"))
+                 (firstrunp (gensym "FIRST-RUN-P")))
+             `(do ((,firstrunp t nil)
+                   (,start (get-universal-time))
+                   (,time (get-universal-time) (get-universal-time))
+                   ,@varlist)
+                  ,(if endlist
+                       (destructuring-bind (test &rest forms)
+                           endlist
+                         `((unless ,firstrunp
+                             (or (>= (- ,time ,start) ,timeout)
+                                 ,test))
+                           (when (and (not ,test)
+                                      ,callback)
+                             (funcall (if (functionp ,callback) ,callback (fdefinition ,callback))))
+                           ,@forms))
+                       `((unless ,firstrunp
+                           (>= (- ,time ,start) ,timeout))
+                         (when ,callback (funcall (if (functionp ,callback) ,callback (fdefinition ,callback))))
+                         nil))
+                ,@body)))
+         (frob-for-no-timeout ()
+           `(do ,varlist ,endlist ,@body)))
+    (cond ((and (constantp timeout env)
+                timeout)
+           (let ((gcallback (gensym "CALLBACK")))
+             `(let ((,gcallback ,callback))
+                ,(frob-for-timeout timeout gcallback))))
+          ((and (constantp timeout env)
+                (null timeout))
+           (frob-for-no-timeout))
+          (t (let ((gtimeout (gensym "TIMEOUT"))
+                   (gcallback (gensym "CALLBACK")))
+               `(let ((,gtimeout ,timeout)
+                      (,gcallback ,callback))
+                  (if ,gtimeout ,(frob-for-timeout gtimeout gcallback) ,(frob-for-no-timeout))))))))
+(eval-when (:load-toplevel :execute)
+  (setf (gethash 'do-until-timeout %indentation%)
+        '(4 4 4 &body)))
+
+(declaim (ftype (function (function
+                           t
+                           (member :read :access)
+                           &optional
+                           (or null (integer 0))
+                           (or null (and symbol (not keyword)) function)))
+                call/locked-object))
+(defun call/locked-object (thunk object type &optional timeout callback)
+  (flet ((acquire-lock ()
+           (if (eql type :read)
+               (acquire-read-lock object 0)
+               (acquire-access-lock object 0))))
+    (do-until-timeout (timeout callback)
+        ((lockedp (acquire-lock) (acquire-lock)))
+        (lockedp
+         (when lockedp
+           (unwind-protect (funcall thunk)
+             (if (eql type :read)
+                 (release-read-lock object)
+                 (release-access-lock object))))))))
+
+(defmacro with-object-thread-locking ((object) &body body)
+  (let ((gthlo (gensym "THREAD-LOCK")))
     `(if (slot-boundp ,object 'thread-lock)
          (with-slots ((,gthlo thread-lock)) ,object
-           (let ((,gto ,timeout)
-                 (,gtocb ,timeout-callback))
-             (declare (type (or null (integer 1)) ,gto))
-             (check-type ,gto (or null (integer 1)))
-             (block ,gblock
-               (do ((,start (get-universal-time))
-                    (,time (get-universal-time) (get-universal-time)))
-                   ((and ,gto (>= (- ,time ,start) ,gto))
-                    (when (and ,gtocb
-                               (or (functionp ,gtocb)
-                                   (and (symbolp ,gtocb)
-                                        (not (keywordp ,gtocb)))))
-                      (funcall (if (functionp ,gtocb) ,gtocb (fdefinition ,gtocb)))))
-                 (handler-case
-                     (with-timeout (1)
-                       (with-recursive-lock-held (,gthlo)
-                         (return-from ,gblock ,@body)))
-                   (timeout () nil))))))
+           (with-recursive-lock-held (,gthlo)
+             ,@body))
          (progn ,@body))))
 
 (flet ((purge-dead-read-locks (o)
@@ -119,21 +178,35 @@ stack unwind."
          (if (not (thread-alive-p (slot-value o 'access-lock)))
              (setf (slot-value o 'access-lock) nil)
              t)))
-  (defmethod set-access-lock ((o synchronized-object-mixin) &key timeout timeout-callback)
+  (defmethod acquire-read-lock ((o synchronized-object-mixin) &optional timeout callback)
+    (check-type timeout (or null (integer 0)))
+    (check-type callback (or null function (and symbol (not keyword))))
     (with-slots (access-lock read-locks) o
-      (with-object-thread-locking (o :timeout timeout :timeout-callback timeout-callback)
-        (when (and (or (null access-lock)
-                       (and access-lock (not (thread-alive-p access-lock)))
-                       (eql access-lock (current-thread)))
-                   (or (null read-locks)
-                       (null (purge-dead-read-locks o))))
-          (setf access-lock (current-thread))))))
-  (defmethod set-read-lock ((o synchronized-object-mixin) &key timeout timeout-callback)
+      (do-until-timeout (timeout callback)
+          ((lockedp nil))
+          (lockedp lockedp)
+        (with-object-thread-locking (o)
+          (cond ((eql access-lock (current-thread))
+                 (setf lockedp t))
+                ((or (null access-lock)
+                     (null (purge-dead-access-lock o)))
+                 (pushnew (current-thread) read-locks)
+                 (setf lockedp t)))))))
+  (defmethod acquire-access-lock ((o synchronized-object-mixin) &optional timeout callback)
     (with-slots (access-lock read-locks) o
-      (with-object-thread-locking (o :timeout timeout :timeout-callback timeout-callback)
-        (when (or (null access-lock)
-                  (null (purge-dead-access-lock o)))
-          (pushnew (current-thread) read-locks))))))
+      (do-until-timeout (timeout callback)
+          ((lockedp nil))
+          (lockedp lockedp)
+        (with-object-thread-locking (o)
+          (when (find (current-thread) read-locks)
+            (error "Attempting to acquire access lock while thread owns read-only lock."))
+          (when (and (or (null access-lock)
+                         (and access-lock (not (thread-alive-p access-lock)))
+                         (eql access-lock (current-thread)))
+                     (or (null read-locks)
+                         (null (purge-dead-read-locks o))))
+            (setf access-lock (current-thread))
+            (setf lockedp t)))))))
 
 (defmethod release-access-lock ((o synchronized-object-mixin))
   (with-slots (thread-lock access-lock) o
@@ -154,23 +227,17 @@ stack unwind."
     "Create a read-only lock for the duration of slot value fetching."
     (if (and (slot-boundp object 'thread-lock)
              (slot-boundp object 'read-locks)
-             (slot-boundp object 'access-lock))
-        (unwind-protect
-             (progn (unless (mutex-managed-slot-p slotd)
-                      (set-read-lock object))
-                    (call-next-method))
-          (unless (mutex-managed-slot-p slotd)
-            (release-read-lock object)))
+             (slot-boundp object 'access-lock)
+             (not (mutex-managed-slot-p slotd)))
+        (with-locked-object (object :read)
+          (call-next-method))
         (call-next-method)))
   (defmethod (setf closer-mop:slot-value-using-class) :around (value class (object synchronized-object-mixin) slotd)
     "Create an access lock for the duration of slot value setting."
     (if (and (slot-boundp object 'thread-lock)
              (slot-boundp object 'read-locks)
-             (slot-boundp object 'access-lock))
-        (unwind-protect
-             (progn (unless (mutex-managed-slot-p slotd)
-                      (set-access-lock object))
-                    (call-next-method))
-          (unless (mutex-managed-slot-p slotd)
-            (release-access-lock object)))
+             (slot-boundp object 'access-lock)
+             (not (mutex-managed-slot-p slotd)))
+        (with-locked-object (object :access)
+          (call-next-method))
         (call-next-method))))

@@ -18,8 +18,8 @@ allowing non-destructive interaction to occur.
 The basic entrypoint for synchronized objects is to create a class with
 the `synchronized-object-mixin' class as a parent class.  Slot access
 locking is automatically provided.  The program may easily extend
-functionality by using the `set-*-lock' and `release-*-lock' functions
-and the `with-locked-object' macro in API routines.
+functionality by using the `acquire-*-lock' and `release-*-lock'
+functions and the `with-locked-object' macro in API routines.
 
 The lock set and release functions are provided as generic functions for
 further, low-level extension."
