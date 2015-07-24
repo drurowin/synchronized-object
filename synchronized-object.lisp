@@ -86,25 +86,29 @@ stack unwind."
         (time (gensym "TIME"))
         (gthlo (gensym "THREAD-LOCK"))
         (gto (gensym "TIMEOUT"))
-        (gtocb (gensym "TIMEOUT-CALLBACK")))
-    `(with-slots ((,gthlo thread-lock)) ,object
-       (let ((,gto ,timeout)
-             (,gtocb ,timeout-callback))
-         (declare (type (or null (integer 1)) ,gto))
-         (check-type ,gto (or null (integer 1)))
-         (do ((,start (get-universal-time))
-              (,time (get-universal-time) (get-universal-time)))
-             ((and ,gto (>= (- ,time ,start) ,gto))
-              (when (and ,gtocb
-                         (or (functionp ,gtocb)
-                             (and (symbolp ,gtocb)
-                                  (not (keywordp ,gtocb)))))
-                (funcall (if (functionp ,gtocb) ,gtocb (fdefinition ,gtocb)))))
-           (handler-case
-               (with-timeout (1)
-                 (with-recursive-lock-held (,gthlo)
-                   ,@body))
-             (timeout () nil)))))))
+        (gtocb (gensym "TIMEOUT-CALLBACK"))
+        (gblock (gensym "THE-BLOCK")))
+    `(if (slot-boundp ,object 'thread-lock)
+         (with-slots ((,gthlo thread-lock)) ,object
+           (let ((,gto ,timeout)
+                 (,gtocb ,timeout-callback))
+             (declare (type (or null (integer 1)) ,gto))
+             (check-type ,gto (or null (integer 1)))
+             (block ,gblock
+               (do ((,start (get-universal-time))
+                    (,time (get-universal-time) (get-universal-time)))
+                   ((and ,gto (>= (- ,time ,start) ,gto))
+                    (when (and ,gtocb
+                               (or (functionp ,gtocb)
+                                   (and (symbolp ,gtocb)
+                                        (not (keywordp ,gtocb)))))
+                      (funcall (if (functionp ,gtocb) ,gtocb (fdefinition ,gtocb)))))
+                 (handler-case
+                     (with-timeout (1)
+                       (with-recursive-lock-held (,gthlo)
+                         (return-from ,gblock ,@body)))
+                   (timeout () nil))))))
+         (progn ,@body))))
 
 (flet ((purge-dead-read-locks (o)
          (declare (type synchronized-object-mixin o))
