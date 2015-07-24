@@ -144,24 +144,21 @@ stack unwind."
       (setf read-locks (remove (current-thread) read-locks))
       t)))
 
-(defmethod closer-mop:slot-value-using-class :around (class (object synchronized-object-mixin) slotd)
-  "Create a read-only lock for the duration of slot value fetching."
-  (unwind-protect
-       (progn (unless (eql (find-class 'synchronized-object-mixin)
-                           (class-of object))
-                (set-read-lock object))
-              (call-next-method))
-    (unless (eql (find-class 'synchronized-object-mixin)
-                 (class-of object))
-      (release-read-lock object))))
-
-(defmethod (setf closer-mop:slot-value-using-class) :around (value class (object synchronized-object-mixin) slotd)
-  "Create an access lock for the duration of slot value setting."
-  (unwind-protect
-       (progn (unless (eql (find-class 'synchronized-object-mixin)
-                           (class-of object))
-                (set-access-lock object))
-              (call-next-method))
-    (unless (eql (find-class 'synchronized-object-mixin)
-                 (class-of object))
-      (release-access-lock object))))
+(flet ((mutex-managed-slot-p (o)
+         (find (closer-mop:slot-definition-name o) '(thread-lock read-locks access-lock))))
+  (defmethod closer-mop:slot-value-using-class :around (class (object synchronized-object-mixin) slotd)
+    "Create a read-only lock for the duration of slot value fetching."
+    (unwind-protect
+         (progn (unless (mutex-managed-slot-p slotd)
+                  (set-read-lock object))
+                (call-next-method))
+      (unless (mutex-managed-slot-p slotd)
+        (release-read-lock object))))
+  (defmethod (setf closer-mop:slot-value-using-class) :around (value class (object synchronized-object-mixin) slotd)
+    "Create an access lock for the duration of slot value setting."
+    (unwind-protect
+         (progn (unless (mutex-managed-slot-p slotd)
+                  (set-access-lock object))
+                (call-next-method))
+      (unless (mutex-managed-slot-p slotd)
+        (release-access-lock object)))))
