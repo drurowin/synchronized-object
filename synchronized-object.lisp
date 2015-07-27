@@ -20,7 +20,13 @@
 ;; THE SOFTWARE.
 (cl:defpackage :org.drurowin.synchronized-object
   (:use :cl :bordeaux-threads :org.drurowin.timeout)
-  (:export #:acquire-read-lock
+  (:export #:*slot-read-timeout*
+           #:*slot-write-timeout*
+           #:lock-timeout
+           #:lock-timeout-object
+           #:lock-timeout-type
+           #:lock-timeout-time
+           #:acquire-read-lock
            #:release-read-lock
            #:acquire-access-lock
            #:release-access-lock
@@ -41,6 +47,20 @@
   (pushnew %indentation% swank::*application-hints-tables*))
 ;;;;========================================================
 ;;;; API routines
+(defparameter *slot-read-timeout* nil
+  "The number of seconds to wait before timing out of a slot read.  The
+default is to not time out.
+
+This variable is special: either set it when creating the thread or bind
+it locally depending on the needs of the routine.")
+
+(defparameter *slot-write-timeout* nil
+  "The number of seconds to wait before timing out of a slot write.  The
+default is to not time out.
+
+This variable is special: either set it when creating the thread or bind
+it locally depending on the needs of the routine.")
+
 (defgeneric acquire-read-lock (object &optional timeout callback)
   (:documentation "Lock the object for read-only access.  On success, true is returned.
 
@@ -85,6 +105,23 @@ for read-only locking (the default) (see `acquire-read-lock'),
 or :ACCESS for destructive locking (see `acquire-access-lock')---during
 the execution of the body forms."
   `(call/locked-object (lambda () ,@body) ,object ,type ,timeout ,callback))
+
+(define-condition lock-timeout (serious-condition)
+  ((type :initarg :type :initform nil :reader lock-timeout-type)
+   (time :initarg :time :initform nil :reader lock-timeout-time)
+   (object :initarg :object :initform nil :reader lock-timeout-object))
+  (:documentation "Signalled when a lock times out.")
+  (:report (lambda (c s)
+             (format s "Could not acquire~@[ ~(~A~)~] lock~@[ for ~S~]~@[ after ~D seconds~]."
+                     (lock-timeout-type c)
+                     (lock-timeout-object c)
+                     (lock-timeout-time c)))))
+
+(defun lock-timeout (object type time)
+  "Signal a `lock-timeout' condition."
+  (check-type type (member :read :access))
+  (check-type time (integer 1))
+  (signal 'lock-timeout :object object :type type :time time))
 
 ;;;;========================================================
 ;;;; implementation
@@ -178,20 +215,30 @@ the execution of the body forms."
 (flet ((mutex-managed-slot-p (o)
          (find (closer-mop:slot-definition-name o) '(thread-lock read-locks access-lock))))
   (defmethod closer-mop:slot-value-using-class :around (class (object synchronized-object-mixin) slotd)
-    "Create a read-only lock for the duration of slot value fetching."
+    "Create a read-only lock for the duration of slot value fetching.
+
+When the `*slot-read-timeout*' is non-NIL and the timeout expires
+`lock-timeout' is signalled."
     (if (and (slot-boundp object 'thread-lock)
              (slot-boundp object 'read-locks)
              (slot-boundp object 'access-lock)
              (not (mutex-managed-slot-p slotd)))
-        (with-locked-object (object :read)
+        (with-locked-object (object :read *slot-read-timeout*
+                                    (lambda ()
+                                      (lock-timeout object :read *slot-read-timeout*)))
           (call-next-method))
         (call-next-method)))
   (defmethod (setf closer-mop:slot-value-using-class) :around (value class (object synchronized-object-mixin) slotd)
-    "Create an access lock for the duration of slot value setting."
+    "Create an access lock for the duration of slot value setting.
+
+When the `*slot-write-timeout*' is non-NIL and the timeout expires
+`lock-timeout' is signalled."
     (if (and (slot-boundp object 'thread-lock)
              (slot-boundp object 'read-locks)
              (slot-boundp object 'access-lock)
              (not (mutex-managed-slot-p slotd)))
-        (with-locked-object (object :access)
+        (with-locked-object (object :access *slot-write-timeout*
+                                    (lambda ()
+                                      (lock-timeout object :access *slot-write-timeout*)))
           (call-next-method))
         (call-next-method))))
