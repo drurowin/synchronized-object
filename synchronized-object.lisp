@@ -19,7 +19,7 @@
 ;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 ;; THE SOFTWARE.
 (cl:defpackage :org.drurowin.synchronized-object
-  (:use :cl :bordeaux-threads)
+  (:use :cl :bordeaux-threads :org.drurowin.timeout)
   (:export #:acquire-read-lock
            #:release-read-lock
            #:acquire-access-lock
@@ -93,52 +93,6 @@ the execution of the body forms."
    (read-locks :initform ())
    (access-lock :initform nil))
   (:documentation "mixin class for objects that lock slot access"))
-
-(defmacro do-until-timeout ((&optional timeout callback)
-                            varlist endlist
-                            &body body
-                            &environment env)
-  (flet ((frob-for-timeout (timeout callback)
-           (let ((start (gensym "START"))
-                 (time (gensym "TIME"))
-                 (firstrunp (gensym "FIRST-RUN-P")))
-             `(do ((,firstrunp t nil)
-                   (,start (get-universal-time))
-                   (,time (get-universal-time) (get-universal-time))
-                   ,@varlist)
-                  ,(if endlist
-                       (destructuring-bind (test &rest forms)
-                           endlist
-                         `((unless ,firstrunp
-                             (or (>= (- ,time ,start) ,timeout)
-                                 ,test))
-                           (when (and (not ,test)
-                                      ,callback)
-                             (funcall (if (functionp ,callback) ,callback (fdefinition ,callback))))
-                           ,@forms))
-                       `((unless ,firstrunp
-                           (>= (- ,time ,start) ,timeout))
-                         (when ,callback (funcall (if (functionp ,callback) ,callback (fdefinition ,callback))))
-                         nil))
-                ,@body)))
-         (frob-for-no-timeout ()
-           `(do ,varlist ,endlist ,@body)))
-    (cond ((and (constantp timeout env)
-                timeout)
-           (let ((gcallback (gensym "CALLBACK")))
-             `(let ((,gcallback ,callback))
-                ,(frob-for-timeout timeout gcallback))))
-          ((and (constantp timeout env)
-                (null timeout))
-           (frob-for-no-timeout))
-          (t (let ((gtimeout (gensym "TIMEOUT"))
-                   (gcallback (gensym "CALLBACK")))
-               `(let ((,gtimeout ,timeout)
-                      (,gcallback ,callback))
-                  (if ,gtimeout ,(frob-for-timeout gtimeout gcallback) ,(frob-for-no-timeout))))))))
-(eval-when (:load-toplevel :execute)
-  (setf (gethash 'do-until-timeout %indentation%)
-        '(4 4 4 &body)))
 
 (declaim (ftype (function (function
                            t

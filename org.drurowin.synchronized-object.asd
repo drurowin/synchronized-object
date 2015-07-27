@@ -23,5 +23,5 @@ functions and the `with-locked-object' macro in API routines.
 
 The lock set and release functions are provided as generic functions for
 further, low-level extension."
-  :depends-on (:bordeaux-threads :closer-mop)
+  :depends-on (:bordeaux-threads :closer-mop :org.drurowin.timeout)
   :components ((:file "synchronized-object")))
