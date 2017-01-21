@@ -104,7 +104,7 @@ The object is locked according to the lock type---one of NIL or :READ
 for read-only locking (the default) (see `acquire-read-lock'),
 or :ACCESS for destructive locking (see `acquire-access-lock')---during
 the execution of the body forms."
-  `(call/locked-object (lambda () ,@body) ,object ,type ,timeout ,callback))
+  `(call/locked-object (lambda () ,@body) ,object (or ,type :read) ,timeout ,callback))
 
 (define-condition lock-timeout (serious-condition)
   ((type :initarg :type :initform nil :reader lock-timeout-type)
